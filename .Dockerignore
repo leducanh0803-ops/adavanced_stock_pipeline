@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+.venv/
+
+# Env files
+.env
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+
+# Airflow
+airflow/logs/
+airflow/*.pid
+
+# dbt
+dbt/target/
+dbt/logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Docker
+docker-compose.override.yml
+
+# Data (important)
+postgres/data/
+minio_data/
+*.parquet
+*.csv
