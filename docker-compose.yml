@@ -9,6 +9,8 @@ services:
             MINIO_ROOT_USER: minio_admin
             MINIO_ROOT_PASSWORD: minio_password
         command: server /data --console-address ":9001"
+        networks:
+            - my-network
         volumes:
             - minio_data:/data
     
@@ -38,10 +40,17 @@ services:
         - 8080:8080
         environment:
             AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow_db
+            HF_API_KEY: "hfd_7c174cfb50eb466c9237d05700220412"
+            MINIO_ENDPOINT: "http://minio:9000"
+            MINIO_ACCESS_KEY: "minio_admin"
+            MINIO_SECRET_KEY: "minio_password"
+            HF_BASE_URL: "https://api.hfdatalibrary.com/v1"
+            BUCKET: "lakehouse"
         group_add:
             - '1001'
         volumes:
             - ./airflow/dags:/opt/airflow/dags
+            - ./airflow/config:/opt/airflow/config
             - /var/run/docker.sock:/var/run/docker.sock
         depends_on:
             postgres: 

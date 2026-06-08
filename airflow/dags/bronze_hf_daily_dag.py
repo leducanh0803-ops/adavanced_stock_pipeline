@@ -4,29 +4,23 @@ import pandas as pd
 import io
 import os
 from datetime import datetime, timedelta
-from pathlib import Path
-from dotenv import load_dotenv
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-load_dotenv()
 
 HF_API_KEY = os.getenv("HF_API_KEY")
-HF_BASE_URL = "https://api.hfdatalibrary.com/v1"
+HF_BASE_URL = os.getenv("HF_BASE_URL")
 HEADERS = {"X-API-Key": HF_API_KEY}
-
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS   = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET   = os.getenv("MINIO_SECRET_KEY")
-BUCKET         = "lakehouse"
+BUCKET         = os.getenv("BUCKET")
 
-BASE_OHLCV =  Path("/mnt/c/DowJones30")
-def get_tickers():
-    tickers = []
-    for dir in BASE_OHLCV.rglob("*.parquet"):
-        tickers.append(dir.name.split("_")[0])
-    return tickers
+def load_tickers():
+    CSV_PATH = "/opt/airflow/dags/config/tickers.csv"
+    return pd.read_csv(CSV_PATH)["ticker"].tolist()
 
+TICKERS = load_tickers()
 
 def get_s3():
     return boto3.client(
@@ -37,10 +31,22 @@ def get_s3():
     )
 
 def fetch_daily_ohlcv(**context):
+    global TICKERS
     execution_date = context["logical_date"]  
-    date_str = (execution_date - timedelta(days=2)).strftime("%Y-%m-%d")
+    date_str =(execution_date - timedelta(days=2)).strftime("%Y-%m-%d")
+    print("=== TASK STARTED ===")
+
+    # date_str = "2026-06-06" 
+    print(f"=== Fetching date: {date_str} ===")
+    
     s3 = get_s3()
-    TICKERS = get_tickers()
+    print("=== S3 client created ===")
+    
+    # Test S3 connection immediately
+    buckets = s3.list_buckets()
+    print(f"=== S3 OK, buckets: {[b['Name'] for b in buckets['Buckets']]} ===")
+    
+    s3 = get_s3()
     success, skipped, failed = 0, 0, 0
 
     for ticker in TICKERS:
