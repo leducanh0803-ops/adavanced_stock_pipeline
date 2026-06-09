@@ -60,6 +60,28 @@ services:
         command: >
             bash -c "airflow db migrate && 
             airflow standalone"
+    
+    nessie:
+        image: projectnessie/nessie:latest
+        container_name: nessie_container
+        ports:
+            - "19120:19120"
+        environment:
+            - QUARK_HTTP_PORT=19120
+            - nessie.version.store.type=IN_MEMORY
+        networks:
+            - my-network
+    
+    spark:
+        image: apache/spark:latest
+        container_name: spark_container
+        ports:
+            - "8081:8080"
+        command: >
+            /opt/spark/bin/spark-class
+            org.apache.spark.deploy.master.Master
+        networks:
+            - my-network
 
 networks:
     my-network:
