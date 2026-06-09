@@ -33,7 +33,7 @@ def get_s3():
 def fetch_daily_ohlcv(**context):
     global TICKERS
     execution_date = context["logical_date"]  
-    date_str =(execution_date - timedelta(days=2)).strftime("%Y-%m-%d")
+    date_str =(execution_date - timedelta(days=1)).strftime("%Y-%m-%d")
     print("=== TASK STARTED ===")
 
     # date_str = "2026-06-06" 
@@ -98,8 +98,8 @@ def fetch_daily_ohlcv(**context):
     
 with DAG(
     dag_id="bronze_hf_daily",
-    start_date=datetime(2024, 3, 7),
-    schedule="0 22 * * 2-6",   # 10pm daily, weekdays only (after US market close)
+    start_date=datetime(2026, 6, 5),
+    schedule="0 22 * * 3-7",   # 10pm daily, weekdays only (after US market close)
     catchup=False,
     default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},
     tags=["bronze", "hf"],
