@@ -73,13 +73,36 @@ services:
             - my-network
     
     spark:
-        image: apache/spark:latest
+        build: 
+            context: ./spark
+            dockerfile: Dockerfile
         container_name: spark_container
         ports:
             - "8081:8080"
-        command: >
-            /opt/spark/bin/spark-class
-            org.apache.spark.deploy.master.Master
+            - "7077:7077"
+        environment:
+            - SPARK_MODE=master
+            - AWS_ACCESS_KEY_ID=minio_admin
+            - AWS_SECRET_ACCESS_KEY=minio_password
+        command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+        volumes:
+            - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+        networks:
+            - my-network
+    
+    spark-worker:
+        build:
+            context: ./spark
+            dockerfile: Dockerfile
+        environment:
+            - SPARK_MODE=worker
+            - AWS_ACCESS_KEY_ID=minio_admin
+            - AWS_SECRET_ACCESS_KEY=minio_password
+        command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
+        volumes:
+            - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+        depends_on:
+            - spark
         networks:
             - my-network
 
