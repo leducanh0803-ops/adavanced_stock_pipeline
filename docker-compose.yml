@@ -107,14 +107,18 @@ services:
             - my-network
     
     jupyter:
-        image: jupyter/pyspark-notebook:latest
+        build:
+            context: ./jupyter
+            dockerfile: Dockerfile
         container_name: jupyter_container
         ports:
             - "8888:8888"
         environment:
-            JUPYTER_ENABLE_LAB: "yes"
+            - AWS_ACCESS_KEY_ID=minio_admin
+            - AWS_SECRET_ACCESS_KEY=minio_password
         volumes:
-            - ./notebooks:/home/jovyan/work
+            - ./notebooks:/opt/spark/work
+            - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
         networks:
             - my-network
 
