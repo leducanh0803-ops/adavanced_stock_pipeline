@@ -101,7 +101,7 @@ with DAG(
     start_date=datetime(2026, 6, 5),
     schedule="0 22 * * 3-7",   # 10pm daily, weekdays only (after US market close)
     catchup=False,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},
+    default_args={"retries": 2, "retry_delay": timedelta(minutes=3)},
     tags=["bronze", "hf"],
 ) as dag:
 
