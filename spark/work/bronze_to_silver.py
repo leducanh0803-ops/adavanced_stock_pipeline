@@ -120,6 +120,7 @@ def record_loaded_files(spark: SparkSession, table_name: str, objects: list[dict
         return
     rows = [(table_name, obj["key"], obj["size"], "loaded") for obj in objects]
     df = spark.createDataFrame(rows, schema=["table_name", "file_key", "file_size", "status"])
+    df = df.coalesce(4)  
     df.write.jdbc(
         url=PG_JDBC_URL,
         table=MANIFEST_TABLE,
