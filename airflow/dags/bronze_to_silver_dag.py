@@ -44,7 +44,7 @@ with DAG(
         },
         mounts=[
             Mount(
-                source="/home/leduc/repos/lakehouse_stock_project/spark/work",  # update to absolute host path containing bronze_to_silver.py
+                source="/home/leduc/repos/lakehouse_stock_project/spark/work/bronze_to_silver.py",  # update to absolute host path containing bronze_to_silver.py
                 target="/opt/spark/work",
                 type="bind",
             ),
@@ -55,4 +55,42 @@ with DAG(
             ),
         ],
         mount_tmp_dir=False,
-    )
+    ) 
+    silver_to_gold = DockerOperator(
+        task_id="silver_to_gold",
+        image="lakehouse_stock_project-spark:latest",  
+        api_version="auto",
+        auto_remove="success",
+        command=(
+            "/opt/spark/bin/spark-submit "
+            "--master spark://spark:7077 "
+            "--jars /opt/spark/jars/postgresql-42.7.3.jar "
+            "/opt/spark/work/bronze_to_silver.py"
+        ),
+        docker_url="unix://var/run/docker.sock",
+        network_mode="lakehouse_stock_project_my-network",
+        environment={
+            "AWS_ACCESS_KEY_ID": "minio_admin",
+            "AWS_SECRET_ACCESS_KEY": "minio_password",
+            "MINIO_ENDPOINT": "http://minio:9000",
+            "PG_HOST": "postgres",
+            "PG_PORT": "5432",
+            "PG_DB": "db",
+            "PG_USER": "db_user",
+            "PG_PASSWORD": "db_password",
+        },
+        mounts=[
+            Mount(
+                source="/home/leduc/repos/lakehouse_stock_project/spark/work/silver_to_gold.py",  # update to absolute host path containing bronze_to_silver.py
+                target="/opt/spark/work",
+                type="bind",
+            ),
+            Mount(
+                source="/home/leduc/repos/lakehouse_stock_project/spark/spark-defaults.conf",  # update to absolute host path
+                target="/opt/spark/conf/spark-defaults.conf",
+                type="bind",
+            ),
+        ],
+        mount_tmp_dir=False,
+    ) 
+    bronze_to_silver >> silver_to_gold

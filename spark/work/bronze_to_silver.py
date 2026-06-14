@@ -1,34 +1,19 @@
-"""
-Bronze -> Silver (incremental, manifest-tracked)
-
-Scans s3a://lakehouse/bronze/ for .parquet files (recursive), skips files
-already recorded in the `bronze_silver_manifest` Postgres table, reads the
-new files, and MERGE INTOs them into the corresponding Iceberg table in
-the `nessie.silver` namespace (upsert on a configurable key, fallback to
-append if no key columns are present).
-
-Run inside the spark container, e.g.:
-    spark-submit \
-        --jars /opt/spark/jars/postgresql-42.7.3.jar \
-        /opt/spark/work/bronze_to_silver.py
-
-Required env vars (already present in your compose for af / spark containers):
-    AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, MINIO_ENDPOINT
-    PG_HOST, PG_PORT, PG_DB, PG_USER, PG_PASSWORD
-"""
-
 from __future__ import annotations
 
-from pyspark.sql import SparkSession, DataFrame
-import boto3
 import os
 import re
+import boto3
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
+# Configuration Constants
 BUCKET = "lakehouse"
 BRONZE_PREFIX = "bronze/"
 SILVER_NAMESPACE = "nessie.silver"
 MANIFEST_TABLE = "bronze_silver_manifest"
 
+# Environment Variables (with fallback defaults)
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_ACCESS_KEY = os.environ.get("AWS_ACCESS_KEY_ID", "minio_admin")
 MINIO_SECRET_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "minio_password")
@@ -46,20 +31,19 @@ PG_PROPERTIES = {
     "driver": "org.postgresql.Driver",
 }
 
-# Per-table merge keys for upsert. If a table isn't listed here, new rows
-# are simply appended (no dedup).
+# Per-table merge keys for upsert.
 MERGE_KEYS: dict[str, list[str]] = {
     "ohlcv": ["ticker", "date"],
-    # "fundamentals": ["ticker", "report_date"],
 }
 
 
 def get_spark() -> SparkSession:
+    """Initialize or retrieve the active Spark Session."""
     return SparkSession.builder.appName("bronze_to_silver_incremental").getOrCreate()
 
 
 def list_bronze_parquet_files(s3_client) -> list[dict]:
-    """Recursively list all .parquet objects under bronze/ (rglob equivalent)."""
+    """Recursively list all .parquet objects under bronze/."""
     objects = []
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=BUCKET, Prefix=BRONZE_PREFIX):
@@ -71,17 +55,12 @@ def list_bronze_parquet_files(s3_client) -> list[dict]:
 
 def table_name_from_key(key: str) -> str:
     """
-    Use the first path segment under bronze/ as the table name, so all
-    symbols/dates for a dataset land in one table.
-
-    e.g. bronze/ohlcv/AAPL/2024-01-01.parquet      -> ohlcv
-         bronze/fundamentals/AAPL/2024-Q1.parquet  -> fundamentals
-         bronze/news/2024-01-01.parquet            -> news
+    Extracts the table name from the first path segment under bronze/.
+    e.g. bronze/ohlcv/1min/AAPL_raw_1min.parquet -> ohlcv
     """
     rel = key[len(BRONZE_PREFIX):]
     parts = rel.split("/")
     if len(parts) == 1:
-        # file sits directly under bronze/, use filename (without extension)
         name = os.path.splitext(parts[0])[0]
     else:
         name = parts[0]
@@ -93,6 +72,7 @@ def table_name_from_key(key: str) -> str:
 
 
 def group_files_by_table(objects: list[dict]) -> dict[str, list[dict]]:
+    """Groups S3 objects by their calculated target table names."""
     groups: dict[str, list[dict]] = {}
     for obj in objects:
         table = table_name_from_key(obj["key"])
@@ -115,7 +95,7 @@ def get_loaded_keys(spark: SparkSession) -> set[str]:
 
 
 def record_loaded_files(spark: SparkSession, table_name: str, objects: list[dict]) -> None:
-    """Append rows to the manifest table for files just loaded."""
+    """Append rows to the manifest table for files just processed."""
     if not objects:
         return
     rows = [(table_name, obj["key"], obj["size"], "loaded") for obj in objects]
@@ -130,24 +110,38 @@ def record_loaded_files(spark: SparkSession, table_name: str, objects: list[dict
 
 
 def merge_into_silver(spark: SparkSession, df: DataFrame, full_table_name: str, table_short_name: str) -> None:
+    """Performs an idempotent MERGE INTO or APPEND into the Iceberg Silver table."""
     merge_keys = MERGE_KEYS.get(table_short_name)
 
+    # If Iceberg table doesn't exist yet, initialize it directly with the schema
     if not spark.catalog.tableExists(full_table_name):
-        print(f"Creating new table {full_table_name}")
+        print(f"Creating new Iceberg table: {full_table_name}")
         df.writeTo(full_table_name).using("iceberg").create()
         return
 
+    # Fallback to append if no merge keys are configured
     if not merge_keys:
-        print(f"No merge keys configured for '{table_short_name}', appending rows to {full_table_name}")
+        print(f"No merge keys configured for '{table_short_name}', appending rows directly.")
         df.writeTo(full_table_name).append()
         return
 
+    # --- Deduplication Safeguard ---
+    # Prevents Spark from crashing if the same incoming batch contains duplicate rows for a key
+    print(f"Safeguarding batch: Removing row duplicates on keys {merge_keys}")
+    window_spec = Window.partitionBy(*merge_keys).orderBy(
+        F.col("timestamp").desc() if "timestamp" in df.columns else F.lit(1)
+    )
+    df_deduped = df.withColumn("_row_num", F.row_number().over(window_spec)) \
+                   .filter(F.col("_row_num") == 1) \
+                   .drop("_row_num")
+
     print(f"Upserting into {full_table_name} on keys {merge_keys}")
     staging_view = f"staging_{table_short_name}"
-    df.createOrReplaceTempView(staging_view)
+    df_deduped.createOrReplaceTempView(staging_view)
 
+    # Dynamic SQL Building block generations
     on_clause = " AND ".join(f"target.{k} = source.{k}" for k in merge_keys)
-    all_cols = df.columns
+    all_cols = df_deduped.columns
     update_set = ", ".join(f"target.{c} = source.{c}" for c in all_cols)
     insert_cols = ", ".join(all_cols)
     insert_vals = ", ".join(f"source.{c}" for c in all_cols)
@@ -166,6 +160,7 @@ def main():
     spark = get_spark()
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {SILVER_NAMESPACE}")
 
+    # Initialize standard boto3 client to communicate with MinIO S3
     s3 = boto3.client(
         "s3",
         endpoint_url=MINIO_ENDPOINT,
@@ -189,6 +184,7 @@ def main():
         spark.stop()
         return
 
+    # Group files by destination table logic
     groups = group_files_by_table(new_objects)
 
     for table, objects in groups.items():
@@ -198,11 +194,20 @@ def main():
         print(f"\nReading {len(paths)} new file(s) for table '{full_table_name}'")
         df = spark.read.parquet(*paths)
 
+        # --- Dynamic Ticker Extraction ---
+        # Extracts string before '_raw' from filename (e.g., AAPL_raw_1min.parquet -> AAPL)
+        df = df.withColumn(
+            "ticker", 
+            F.regexp_extract(F.input_file_name(), r"([^/]+)_raw", 1)
+        )
+
+        # Perform the safe merge transaction
         merge_into_silver(spark, df, full_table_name, table)
 
         row_count = df.count()
-        print(f"Processed {row_count} row(s) for {full_table_name}")
+        print(f"Processed {row_count} total row(s) into {full_table_name}")
 
+        # Update the state manifest database table
         record_loaded_files(spark, table, objects)
         print(f"Recorded {len(objects)} file(s) in manifest for '{table}'")
 

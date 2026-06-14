@@ -14,3 +14,7 @@ RUN curl -o /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-1.5.2.jar \
     https://jdbc.postgresql.org/download/postgresql-42.7.3.jar &&\
     pip install boto3
 USER spark
+
+# Read file from specified path
+RUN read_file --filepath "/home/leduc/repos/lakehouse_stock_project/spark/Dockerfile"
+
