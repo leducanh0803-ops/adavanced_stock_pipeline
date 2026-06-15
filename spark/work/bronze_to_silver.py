@@ -197,9 +197,9 @@ def main():
         # --- Dynamic Ticker Extraction ---
         # Extracts string before '_raw' from filename (e.g., AAPL_raw_1min.parquet -> AAPL)
         df = df.withColumn(
-            "ticker", 
-            F.regexp_extract(F.input_file_name(), r"([^/]+)_raw", 1)
-        )
+        "ticker", 
+        F.regexp_extract(F.col("_metadata.file_name"), r"([^/]+)_raw", 1)
+    )
 
         # Perform the safe merge transaction
         merge_into_silver(spark, df, full_table_name, table)

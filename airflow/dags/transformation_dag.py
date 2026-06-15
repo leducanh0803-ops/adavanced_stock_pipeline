@@ -10,7 +10,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="bronze_to_silver",
+    dag_id="transformation",
     description="Incrementally load new bronze parquet files into silver Iceberg tables",
     schedule="0 22 * * 3-7",
     start_date=datetime(2026, 6, 5),
@@ -44,18 +44,20 @@ with DAG(
         },
         mounts=[
             Mount(
-                source="/home/leduc/repos/lakehouse_stock_project/spark/work/bronze_to_silver.py",  # update to absolute host path containing bronze_to_silver.py
+                # FIX 1: Mount the PARENT FOLDER so both scripts are accessible
+                source="/home/leduc/repos/lakehouse_stock_project/spark/work",  
                 target="/opt/spark/work",
                 type="bind",
             ),
             Mount(
-                source="/home/leduc/repos/lakehouse_stock_project/spark/spark-defaults.conf",  # update to absolute host path
+                source="/home/leduc/repos/lakehouse_stock_project/spark/spark-defaults.conf",  
                 target="/opt/spark/conf/spark-defaults.conf",
                 type="bind",
             ),
         ],
         mount_tmp_dir=False,
     ) 
+
     silver_to_gold = DockerOperator(
         task_id="silver_to_gold",
         image="lakehouse_stock_project-spark:latest",  
@@ -65,7 +67,7 @@ with DAG(
             "/opt/spark/bin/spark-submit "
             "--master spark://spark:7077 "
             "--jars /opt/spark/jars/postgresql-42.7.3.jar "
-            "/opt/spark/work/bronze_to_silver.py"
+            "/opt/spark/work/silver_to_gold.py"  # FIX 2: Fixed the script filename typo here
         ),
         docker_url="unix://var/run/docker.sock",
         network_mode="lakehouse_stock_project_my-network",
@@ -81,16 +83,18 @@ with DAG(
         },
         mounts=[
             Mount(
-                source="/home/leduc/repos/lakehouse_stock_project/spark/work/silver_to_gold.py",  # update to absolute host path containing bronze_to_silver.py
+                # FIX 1: Mount the PARENT FOLDER here as well
+                source="/home/leduc/repos/lakehouse_stock_project/spark/work",  
                 target="/opt/spark/work",
                 type="bind",
             ),
             Mount(
-                source="/home/leduc/repos/lakehouse_stock_project/spark/spark-defaults.conf",  # update to absolute host path
+                source="/home/leduc/repos/lakehouse_stock_project/spark/spark-defaults.conf",  
                 target="/opt/spark/conf/spark-defaults.conf",
                 type="bind",
             ),
         ],
         mount_tmp_dir=False,
     ) 
+
     bronze_to_silver >> silver_to_gold

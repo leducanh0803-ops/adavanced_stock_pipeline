@@ -1,3 +1,9 @@
+x-superset-user: &superset-user root
+x-superset-volumes: &superset-volumes
+  # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
+  - ./docker:/app/docker
+  - ./superset:/app/superset
+  - ./docker/superset_config.py:/app/pythonpath/superset_config.py
 services:
     minio:
         image: minio/minio:latest
@@ -26,6 +32,7 @@ services:
         volumes:
             - ./postgres/data:/var/lib/postgresql/data
             - ./postgres/airflow-init.sql:/docker-entrypoint-initdb.d/airflow-init.sql
+            - ./postgres/superset-init.sql:/docker-entrypoint-initdb.d/superset-init.sql
         healthcheck:
             test: ["CMD-SHELL","pg_isready -U db_user -d db"]
             interval: 5s
@@ -121,9 +128,60 @@ services:
             - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
         networks:
             - my-network
+    
+    superset:
+        env_file:
+            - path: docker/.env # default
+              required: true
+        image: apache/superset:3.0.0-py310
+        command: ["/app/docker/docker-bootstrap.sh", "app"]
+        restart: unless-stopped
+        ports:
+            - ${SUPERSET_PORT:-8088}:8088
+        environment:
+            DATABASE_DB: "${POSTGRES_DB:-superset_db}"
+        user: *superset-user
+        depends_on:
+            superset-init:
+                condition: service_completed_successfully
+        volumes: *superset-volumes
+        networks:
+            - my-network
+
+    superset-init:
+        image: apache/superset:3.0.0-py310
+        command: ["/app/docker/docker-init.sh"]
+        env_file:
+            - path: docker/.env # default
+              required: true
+        environment:
+            DATABASE_DB: "${POSTGRES_DB:-superset_db}"
+        depends_on:
+            postgres:
+                condition: service_started
+            redis:
+                condition: service_started
+        user: *superset-user
+        volumes: *superset-volumes
+        healthcheck:
+            disable: true
+        networks:
+            - my-network
+    
+    redis:
+        image: redis:7
+        restart: unless-stopped
+        ports:
+            - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+        volumes:
+            - redis:/data
+        networks:
+            - my-network
 
 networks:
     my-network:
         driver: bridge
 volumes:
     minio_data:
+    redis:
+        external: false
