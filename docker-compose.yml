@@ -2,7 +2,7 @@ x-superset-user: &superset-user root
 x-superset-volumes: &superset-volumes
   # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
   - ./docker:/app/docker
-  - ./superset:/app/superset
+  #- ./superset:/app/superset
   - ./docker/superset_config.py:/app/pythonpath/superset_config.py
 services:
     minio:
