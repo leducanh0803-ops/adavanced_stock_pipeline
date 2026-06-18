@@ -44,7 +44,7 @@ services:
         container_name: airflow_container
         image: apache/airflow:3.0.0
         ports:
-        - 8080:8080
+            - 8080:8080
         environment:
             AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow_db
             HF_API_KEY: "hfd_7c174cfb50eb466c9237d05700220412"
@@ -94,6 +94,12 @@ services:
         command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
         volumes:
             - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+        healthcheck:
+            test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/7077'"]
+            interval: 100s
+            timeout: 5s
+            retries: 10
+            start_period: 30s
         networks:
             - my-network
     
@@ -113,6 +119,34 @@ services:
         networks:
             - my-network
     
+    spark-thrift:
+        build:
+            context: ./spark
+            dockerfile: Dockerfile
+        container_name: spark_thrift_container
+        ports:
+            - "10000:10000"
+            - "10002:10002"
+        environment:
+            - AWS_ACCESS_KEY_ID=minio_admin
+            - AWS_SECRET_ACCESS_KEY=minio_password
+            - SPARK_NO_DAEMONIZE=1
+        command: >
+            bash -c "
+            /opt/spark/sbin/start-thriftserver.sh
+            --master spark://spark:7077
+            --hiveconf hive.server2.thrift.bind.host=0.0.0.0
+            --hiveconf hive.server2.thrift.port=10000
+            && tail -f /opt/spark/logs/*"
+        depends_on:
+            spark:
+                condition: service_started
+            nessie:
+                condition: service_started
+        volumes:
+            - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+        networks:
+            - my-network
     jupyter:
         build:
             context: ./jupyter
@@ -133,7 +167,9 @@ services:
         env_file:
             - path: docker/.env # default
               required: true
-        image: apache/superset:3.0.0-py310
+        build:
+            context: ./docker
+            dockerfile: Dockerfile
         command: ["/app/docker/docker-bootstrap.sh", "app"]
         restart: unless-stopped
         ports:
@@ -149,7 +185,9 @@ services:
             - my-network
 
     superset-init:
-        image: apache/superset:3.0.0-py310
+        build:
+            context: ./docker
+            dockerfile: Dockerfile
         command: ["/app/docker/docker-init.sh"]
         env_file:
             - path: docker/.env # default
