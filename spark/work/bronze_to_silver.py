@@ -31,9 +31,80 @@ PG_PROPERTIES = {
     "driver": "org.postgresql.Driver",
 }
 
-# Per-table merge keys for upsert.
-MERGE_KEYS: dict[str, list[str]] = {
-    "ohlcv": ["ticker", "date"],
+
+def load_ohlcv(spark: SparkSession, objects: list[dict]) -> DataFrame:
+    """
+    Bronze ohlcv data ships in two physically different layouts that must be
+    normalized onto one common schema before they can land in the same
+    Iceberg table:
+
+      bronze/ohlcv/1min/daily_data/date=.../{symbol}.parquet
+          timestamp: string : already has its own `date` column
+
+      bronze/ohlcv/1min/date=.../...   (historical backfill)
+          timestamp: long, nanoseconds since epoch : no `date` column
+
+    Both already carry a native `symbol` column, so no filename parsing is
+    needed to identify the ticker -- that's why there's no ticker-extraction
+    step here unlike the original draft of this script.
+    """
+    daily_keys = [o for o in objects if "/daily_data/" in o["key"]]
+    backfill_keys = [o for o in objects if "/daily_data/" not in o["key"]]
+
+    frames: list[DataFrame] = []
+
+    if daily_keys:
+        paths = [f"s3a://{BUCKET}/{o['key']}" for o in daily_keys]
+        print(f"Reading {len(paths)} daily_data file(s)")
+        df_daily = spark.read.parquet(*paths)
+        df_daily = df_daily.withColumn("timestamp", F.to_timestamp(F.col("timestamp")))
+        frames.append(df_daily)
+
+    if backfill_keys:
+        paths = [f"s3a://{BUCKET}/{o['key']}" for o in backfill_keys]
+        print(f"Reading {len(paths)} backfill file(s)")
+        df_backfill = spark.read.parquet(*paths)
+        df_backfill = (
+            df_backfill
+            .withColumn("timestamp", F.timestamp_seconds(F.col("timestamp") / F.lit(1_000_000_000)))
+            .withColumn("date", F.to_date(F.col("timestamp")))
+        )
+        frames.append(df_backfill)
+
+    if not frames:
+        raise ValueError("load_ohlcv called with no matching files")
+
+    if len(frames) == 1:
+        return frames[0]
+
+    # Both layouts now share an identical column set after normalization;
+    # align column order before unioning so unionByName lines up cleanly.
+    common_cols = frames[0].columns
+    return frames[0].unionByName(frames[1].select(*common_cols))
+
+
+# --- Per-table schema configuration -------------------------------------
+# One entry per distinct bronze "table" (the first folder name under bronze/,
+# as derived by table_name_from_key). To onboard a new schema later, add a
+# new entry here.
+#
+#   merge_keys: columns that uniquely identify a row -> enables idempotent
+#               upsert via MERGE INTO. Leave empty/omit to fall back to
+#               plain append (no dedup protection).
+#   loader:     optional custom (spark, objects) -> DataFrame function for
+#               tables whose bronze files need special handling (e.g. ohlcv,
+#               which spans two physically different layouts). If omitted,
+#               falls back to a plain spark.read.parquet(*paths) over all
+#               new files for that table.
+TABLE_CONFIG: dict[str, dict] = {
+    "ohlcv": {
+        "merge_keys": ["symbol", "timestamp"],  # grain is one row per minute bar
+        "loader": load_ohlcv,
+    },
+    "economic_calendar": {
+        # API schema documents `id` (bigint) as the primary key.
+        "merge_keys": ["id"],
+    },
 }
 
 
@@ -56,7 +127,9 @@ def list_bronze_parquet_files(s3_client) -> list[dict]:
 def table_name_from_key(key: str) -> str:
     """
     Extracts the table name from the first path segment under bronze/.
-    e.g. bronze/ohlcv/1min/AAPL_raw_1min.parquet -> ohlcv
+    e.g. bronze/ohlcv/1min/daily_data/date=2026-06-18/MMM.parquet -> ohlcv
+    e.g. bronze/ohlcv/1min/date=2026-06-19/MMM.parquet            -> ohlcv
+    e.g. bronze/economic_calendar/date=2026-06-18/batch.parquet   -> economic_calendar
     """
     rel = key[len(BRONZE_PREFIX):]
     parts = rel.split("/")
@@ -100,7 +173,7 @@ def record_loaded_files(spark: SparkSession, table_name: str, objects: list[dict
         return
     rows = [(table_name, obj["key"], obj["size"], "loaded") for obj in objects]
     df = spark.createDataFrame(rows, schema=["table_name", "file_key", "file_size", "status"])
-    df = df.coalesce(4)  
+    df = df.coalesce(4)
     df.write.jdbc(
         url=PG_JDBC_URL,
         table=MANIFEST_TABLE,
@@ -111,7 +184,8 @@ def record_loaded_files(spark: SparkSession, table_name: str, objects: list[dict
 
 def merge_into_silver(spark: SparkSession, df: DataFrame, full_table_name: str, table_short_name: str) -> None:
     """Performs an idempotent MERGE INTO or APPEND into the Iceberg Silver table."""
-    merge_keys = MERGE_KEYS.get(table_short_name)
+    config = TABLE_CONFIG.get(table_short_name, {})
+    merge_keys = config.get("merge_keys")
 
     # If Iceberg table doesn't exist yet, initialize it directly with the schema
     if not spark.catalog.tableExists(full_table_name):
@@ -188,18 +262,16 @@ def main():
     groups = group_files_by_table(new_objects)
 
     for table, objects in groups.items():
-        paths = [f"s3a://{BUCKET}/{o['key']}" for o in objects]
+        config = TABLE_CONFIG.get(table, {})
         full_table_name = f"{SILVER_NAMESPACE}.{table}"
+        loader = config.get("loader")
 
-        print(f"\nReading {len(paths)} new file(s) for table '{full_table_name}'")
-        df = spark.read.parquet(*paths)
-
-        # --- Dynamic Ticker Extraction ---
-        # Extracts string before '_raw' from filename (e.g., AAPL_raw_1min.parquet -> AAPL)
-        df = df.withColumn(
-        "ticker", 
-        F.regexp_extract(F.col("_metadata.file_name"), r"([^/]+)_raw", 1)
-    )
+        if loader:
+            df = loader(spark, objects)
+        else:
+            paths = [f"s3a://{BUCKET}/{o['key']}" for o in objects]
+            print(f"\nReading {len(paths)} new file(s) for table '{full_table_name}'")
+            df = spark.read.parquet(*paths)
 
         # Perform the safe merge transaction
         merge_into_silver(spark, df, full_table_name, table)

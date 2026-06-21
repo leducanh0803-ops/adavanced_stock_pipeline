@@ -3,14 +3,18 @@ import requests
 import pandas as pd
 import io
 import os
+import time
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
 HF_API_KEY = os.getenv("HF_API_KEY")
 HF_BASE_URL = os.getenv("HF_BASE_URL")
-HEADERS = {"X-API-Key": HF_API_KEY}
+HF_HEADERS = {"X-API-Key": HF_API_KEY}
 
+LSE_API_KEY =os.getenv("LSE_API_KEY")
+LSE_BASE_URL = os.getenv("LSE_BASE_URL")
+LF_HEADERS = {"x-api-key": LSE_API_KEY} 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS   = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET   = os.getenv("MINIO_SECRET_KEY")
@@ -30,13 +34,12 @@ def get_s3():
         aws_secret_access_key=MINIO_SECRET,
     )
 
-def fetch_daily_ohlcv(**context):
+def backfill_fetch_daily_ohlcv(**context): #HF Librabry backfill
     global TICKERS
     execution_date = context["logical_date"]  
-    date_str =(execution_date - timedelta(days=1)).strftime("%Y-%m-%d")
+    date_str =(execution_date - timedelta(days=2)).strftime("%Y-%m-%d")
     print("=== TASK STARTED ===")
 
-    # date_str = "2026-06-06" 
     print(f"=== Fetching date: {date_str} ===")
     
     s3 = get_s3()
@@ -53,10 +56,11 @@ def fetch_daily_ohlcv(**context):
         try:
             resp = requests.get(
                 f"{HF_BASE_URL}/bars/{ticker}",
-                headers=HEADERS,
+                headers=HF_HEADERS,
                 params={
                     "start": date_str,
                     "end": date_str,
+                    "version": "clean",
                     "format": "parquet",
                 },
                 timeout=30,
@@ -75,7 +79,14 @@ def fetch_daily_ohlcv(**context):
                 skipped += 1
                 continue
 
-            df["ticker"] = ticker
+            df["symbol"] = ticker
+            df["timestamp"] = pd.to_datetime(df["datetime"])
+            df['created_at'] = (datetime.now() +timedelta(hours=7)).strftime('%Y-%m-%d %H:%M:%S')
+            df['updated_at'] = (datetime.now() +timedelta(hours=7)).strftime('%Y-%m-%d %H:%M:%S')
+            df.columns =df.columns.str.lower()
+
+            cols_order_to_keep = ['timestamp','open','high','low','close','volume','symbol','created_at','updated_at']
+            df = df[cols_order_to_keep]
 
             buffer = io.BytesIO()
             df.to_parquet(buffer, index=False)
@@ -95,6 +106,76 @@ def fetch_daily_ohlcv(**context):
     # Fail the task if too many tickers failed
     if failed > 10:
         raise ValueError(f"Too many failures: {failed}/{len(TICKERS)}")
+
+def daily_fetch_data(**context): ## using LSE API 
+    global TICKERS
+    execution_date = context["logical_date"]  
+    date_str =(execution_date - timedelta(days=3)).strftime("%Y-%m-%d")
+    print("=== TASK STARTED ===")
+
+    # date_str = "2026-06-06" 
+    print(f"=== Fetching date: {date_str} ===")
+    
+    s3 = get_s3()
+    print("=== S3 client created ===")
+    
+    # Test S3 connection immediately
+    buckets = s3.list_buckets()
+    print(f"=== S3 OK, buckets: {[b['Name'] for b in buckets['Buckets']]} ===")
+    
+    s3 = get_s3()
+    success, skipped, failed = 0, 0, 0
+    HEADERS = {'x-api-key':LSE_API_KEY}
+
+    
+    date_str = (execution_date - timedelta(days=3)).strftime("%Y-%m-%d")
+    next_day_str = (execution_date - timedelta(days=2)).strftime("%Y-%m-%d")  # exclusive upper bound
+
+    for ticker in TICKERS:
+        try:
+            resp = requests.get(
+                f"{LSE_BASE_URL}/d_candles_{ticker.lower()}",
+                headers=HEADERS,
+                params=[
+                    ("timestamp", f"gte.{date_str}"),
+                    ("timestamp", f"lt.{next_day_str}"),
+                    ("order", "timestamp.asc"),
+                ],
+                timeout=30,
+            )
+            if resp.status_code == 404:
+                print(f"SKIP {ticker} — not found")
+                skipped += 1
+                continue
+
+            resp.raise_for_status()
+            df = pd.DataFrame(resp.json())
+
+            if df.empty:
+                print(f"SKIP {ticker} — no data for {date_str} (weekend/holiday)")
+                skipped += 1
+                continue
+
+            buffer = io.BytesIO()
+            df.to_parquet(buffer, index=False)
+            buffer.seek(0)
+
+            s3_key = f"bronze/ohlcv/1min/daily_data/date={date_str}/{ticker}.parquet"
+            s3.put_object(Bucket=BUCKET, Key=s3_key, Body=buffer.getvalue())
+            print(f"OK {ticker} → {s3_key} ({len(df)} rows)")
+            success += 1
+            time.sleep(3)
+
+        except Exception as e:
+            print(f"FAIL {ticker} — {e}")
+            failed += 1
+
+    print(f"\nDone: {success} ok, {skipped} skipped, {failed} failed")
+
+    # Fail the task if too many tickers failed
+    if failed > 10:
+        raise ValueError(f"Too many failures: {failed}/{len(TICKERS)}")
+
     
 with DAG(
     dag_id="bronze_hf_daily",
@@ -104,9 +185,8 @@ with DAG(
     default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
     tags=["bronze", "hf"],
 ) as dag:
-
     t1 = PythonOperator(
         task_id="fetch_daily_ohlcv",
-        python_callable=fetch_daily_ohlcv,
+        python_callable=daily_fetch_data
     )
 
